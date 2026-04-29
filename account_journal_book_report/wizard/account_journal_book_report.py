@@ -69,7 +69,7 @@ class AccountJournalBookReport(models.TransientModel):
         return domain
 
     def _generate_csv_attachment(self):
-        """Generate a CSV fallback for journal book report without report_aeroo."""
+        """Generate a CSV fallback for journal book report without Aeroo."""
         moves = self.env["account.move"].search(self._get_move_domain(), order="date, id")
         buffer = io.StringIO()
         writer = csv.writer(buffer, delimiter=";")
