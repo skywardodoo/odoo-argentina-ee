@@ -1,13 +1,12 @@
 {
     "name": "Reporte de Libro Diario Contable",
-    "version": "19.0.1.1.0",
+    "version": "19.0.1.2.0",
     "author": "ADHOC SA",
     "website": "www.adhoc.com.ar",
     "category": "Localization/Accounting",
     "license": "AGPL-3",
     "depends": [
         "account_reports",
-        "report_aeroo",
         "base_bg",
     ],
     "data": [

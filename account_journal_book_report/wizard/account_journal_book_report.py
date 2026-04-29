@@ -2,11 +2,11 @@
 # For copyright and license notices, see __manifest__.py file in root directory
 ##############################################################################
 import base64
+import csv
+import io
 
-from dateutil.relativedelta import relativedelta
 from markupsafe import Markup
 from odoo import api, fields, models
-from odoo.tools.misc import get_lang
 
 
 class AccountJournalBookReport(models.TransientModel):
@@ -55,51 +55,67 @@ class AccountJournalBookReport(models.TransientModel):
             self.date_from = dates["date_from"]
             self.date_to = dates["date_to"]
 
-    def _print_report(self, data):
-        date_from = fields.Date.from_string(self.date_from)
-        date_to = fields.Date.from_string(self.date_to)
-        periods = []
-        # por mas que el usuario pida fecha distinta al 1 del mes, los move
-        # lines ya van a estar filtrados por esa fecha y por simplicidad
-        # construimos periodos desde el 1
-        dt_from = date_from.replace(day=1)
-        while dt_from < date_to:
-            dt_to = dt_from + relativedelta(months=1, days=-1)
-            periods.append((fields.Date.to_string(dt_from), fields.Date.to_string(dt_to)))
-            # este va a se la date from del proximo
-            dt_from = dt_to + relativedelta(days=1)
-        return (
-            self.env["ir.actions.report"]
-            .search([("report_name", "=", "account_journal_book_report")], limit=1)
-            .with_context(
-                periods=periods,
-                last_entry_number=self.last_entry_number,
-            )
-            .report_action(self)
-        )
-
-    def _retrive_moves_ids(self):
-        """Este método se llama desde el archivo account_journal_book_report.ods y sirve para obtener los asientos
-        contables que estarán en el reporte de libro diario."""
-        domain = [("company_id", "=", self.company_id.id)]
+    def _get_move_domain(self):
+        domain = [
+            ("company_id", "=", self.company_id.id),
+            ("journal_id", "in", self.journal_ids.ids),
+        ]
         if self.target_move == "posted":
             domain.append(("state", "=", "posted"))
         if self.date_from:
             domain.append(("date", ">=", self.date_from))
         if self.date_to:
             domain.append(("date", "<=", self.date_to))
-        moves = self.env["account.move"].search(domain)
-        return moves.ids
+        return domain
 
-    def _build_contexts(self, data):
-        result = {}
-        result["journal_ids"] = "journal_ids" in data["form"] and data["form"]["journal_ids"] or False
-        result["state"] = "target_move" in data["form"] and data["form"]["target_move"] or ""
-        result["date_from"] = data["form"]["date_from"] or False
-        result["date_to"] = data["form"]["date_to"] or False
-        result["strict_range"] = True if result["date_from"] else False
-        result["company_id"] = data["form"]["company_id"][0] or False
-        return result
+    def _generate_csv_attachment(self):
+        """Generate a CSV fallback for journal book report without report_aeroo."""
+        moves = self.env["account.move"].search(self._get_move_domain(), order="date, id")
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, delimiter=";")
+
+        writer.writerow(
+            [
+                "Fecha",
+                "Asiento",
+                "Diario",
+                "Referencia",
+                "Partner",
+                "Cuenta",
+                "Etiqueta",
+                "Debe",
+                "Haber",
+                "Balance",
+            ]
+        )
+        for move in moves:
+            lines = move.line_ids.filtered(lambda line: not line.display_type)
+            for line in lines:
+                writer.writerow(
+                    [
+                        fields.Date.to_string(move.date) or "",
+                        move.name or "",
+                        move.journal_id.display_name or "",
+                        move.ref or "",
+                        line.partner_id.display_name or "",
+                        line.account_id.display_name or "",
+                        line.name or "",
+                        line.debit or 0.0,
+                        line.credit or 0.0,
+                        line.balance or 0.0,
+                    ]
+                )
+
+        csv_bytes = buffer.getvalue().encode("utf-8")
+        return self.env["ir.attachment"].create(
+            {
+                "name": "account_journal_book_report.csv",
+                "datas": base64.b64encode(csv_bytes),
+                "res_model": self._name,
+                "type": "binary",
+                "company_id": self.company_id.id,
+            }
+        )
 
     def action_check_report(self):
         """Este método se llama desde el botón 'Imprimir' del wizard 'Libro Diario'"""
@@ -107,36 +123,11 @@ class AccountJournalBookReport(models.TransientModel):
         if not self._context.get("bg_job"):
             res, _ = self.bg_enqueue("action_check_report")
             return res
-        else:
-            data = {}
-            data["ids"] = self.env.context.get("active_ids", [])
-            data["model"] = self.env.context.get("active_model", "ir.ui.menu")
-            data["form"] = self.read(["date_from", "date_to", "journal_ids", "target_move", "company_id"])[0]
-            used_context = self._build_contexts(data)
-            data["form"]["used_context"] = dict(used_context, lang=get_lang(self.env).code)
-            res = self.with_context(discard_logo_check=True)._print_report(data)
-            reportname = res.get("report_name")
-            report = self.env["ir.actions.report"].search([("report_name", "=", reportname)], limit=1)
-            docids = res.get("context")["active_ids"]
-            periods = res.get("context")["periods"]
-            document, doc_format = report.with_context(
-                must_skip_send_to_printer=True, last_entry_number=self.last_entry_number, periods=periods
-            )._render_aeroo(reportname, docids, data=data)
-            attachment = self.env["ir.attachment"].create(
-                {
-                    "name": reportname + ".xls",
-                    "datas": base64.b64encode(document),
-                    "res_model": self._name,
-                    "type": "binary",
-                    "company_id": self.company_id.id,
-                }
-            )
-
-            base_url = self.env["ir.config_parameter"].sudo().get_param("web.base.url")
-            download_url = f"{base_url}/web/content/{attachment.id}?download=true"
-
-            res_html = f"""
-                The following document has been generated:<br>
-                <a href="{download_url}" target="_blank">{attachment.name}</a>
-            """
-            return Markup(res_html)
+        attachment = self._generate_csv_attachment()
+        base_url = self.env["ir.config_parameter"].sudo().get_param("web.base.url")
+        download_url = f"{base_url}/web/content/{attachment.id}?download=true"
+        res_html = f"""
+            The following document has been generated:<br>
+            <a href="{download_url}" target="_blank">{attachment.name}</a>
+        """
+        return Markup(res_html)
