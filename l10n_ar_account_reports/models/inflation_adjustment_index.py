@@ -18,6 +18,32 @@ class InflationAdjustmentIndex(models.Model):
     )
     xml_id = fields.Char(compute="_compute_xml_id", string="External ID")
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        """Make XML data loading idempotent in upgrades.
+
+        During installation/update, if an index for the same month already
+        exists (possibly created by another module/version), reuse it instead
+        of creating a duplicate that would fail constraints.
+        """
+        if not self.env.context.get("install_mode"):
+            return super().create(vals_list)
+
+        records = self.browse()
+        for vals in vals_list:
+            date = vals.get("date")
+            existing = date and self.find(date)
+            if existing:
+                update_vals = {}
+                if "value" in vals and existing.value != vals["value"]:
+                    update_vals["value"] = vals["value"]
+                if update_vals:
+                    existing.write(update_vals)
+                records |= existing
+            else:
+                records |= super().create(vals)
+        return records
+
     @api.depends()
     def _compute_xml_id(self):
         res = self.get_external_id()
